@@ -1,5 +1,4 @@
 import re
-import sys
 
 not_in_table = 0
 in_header_row = 1
@@ -8,16 +7,18 @@ in_table_content = 3
 
 bad_format_err = "Format error. Expected very simple markdown consisting of one or more tables."
 
-divider_row_pat = re.compile(r'--+(\s*\|\s*--+)+')
-content_row_pat = re.compile(r'([-a-z]+)(?:\s*\|\s*[^|]+)+')
+divider_row_pat = re.compile(r'--+(\s*\|\s*--+){2}')
+content_row_pat = re.compile(r'([-a-z]+)\s*\|([^|])*\|\s*(.*)')
 
 
 def load(fname):
-    tokens = []
+    parsed_lines = []
     with open(fname, 'rt') as f:
-        lines = [l.strip() for l in f.readlines() if l.strip()]
+        lines = [l.rstrip() for l in f.readlines()]
     state = not_in_table
+    i = 0
     for line in lines:
+        parsed_lines.append([line,None])
         if state == not_in_table:
             if '|' in line:
                 if divider_row_pat.match(line):
@@ -34,155 +35,119 @@ def load(fname):
             m = content_row_pat.match(line)
             if m:
                 state = in_table_content
-                tokens.append(m.group(1))
+                parsed_lines[-1][1] = m
             else:
                 raise Exception(bad_format_err)
         elif state == in_table_content:
             m = content_row_pat.match(line)
             if m:
-                tokens.append(m.group(1))
+                parsed_lines[-1][1] = m
             else:
                 state = not_in_table
+        i += 1
+    return parsed_lines
 
 
-def tweak_case(token):
-    j = 1
-    while True:
-        i = token.find('-', j)
-        if i == -1:
-            break
-        token = token[:i + 1] + token[i + 1].upper() + token[i + 2:]
+def _next_way_to_reach(total, counts):
+    # This func is never called directly. We can safely assume
+    # that it is always possible to reach total based on what's
+    # in counts.
 
-
-def get_naive_unique_prefix(word, words):
-    if not word:
-        raise ValueError("empty word")
-    common_char_count = 0
-    word_len = len(word)
-    for w in words:
-        if w != word:
-            w_len = len(w)
-            end = min(word_len, w_len)
-            found_diff = False
-            for i in range(end):
-                if word[i] != w[i]:
-                    found_diff = True
-                    break
-                if i + 1 > common_char_count:
-                    common_char_count = i + 1
-            if not found_diff:
-                raise Exception("no unique prefix")
-    if common_char_count == word_len:
-        raise Exception("no unique prefix")
-    return word[:max(common_char_count, 1)]
-
-
-def get_prefix_set(words_in_token, indexes):
-    x = []
-    for i in range(len(words_in_token)):
-        word = words_in_token[i]
-        idx = indexes[i]
-        if idx >= len(word):
-            return None
-        x.append(word[:idx + 1])
-    return x
-
-
-def increment_index_per_word(idx_per_word, len_per_word, last_incremented_idx, word_count):
-    while True:
-        to_increment = (last_incremented_idx + 1) % word_count
-        if last_incremented_idx < word_count - 1:
-            if idx_per_word[last_incremented_idx] > 0:
-                idx_per_word[last_incremented_idx] -= 1
-        if idx_per_word[to_increment] < len_per_word[to_increment]:
-            idx_per_word[to_increment] += 1
-            return to_increment
+    # Suppose total = 3 and counts = [5, 2, 1]
+    take = min(total, counts[0])
+    for i in range(take, 0, -1):
+        prefix = [i]
+        remainder = total - i
+        if remainder:
+            if len(counts) > 1:
+                for way in _next_way_to_reach(remainder, counts[1:]):
+                    combo = prefix + way
+                    yield combo
         else:
-            last_incremented_idx += 1
-            if last_incremented_idx == 0 and idx_per_word == len_per_word:
-                raise Exception("overflow")
+            yield prefix
 
 
-def get_best_with_same_word_count(words_in_tokens_with_same_wordcount, token_idx):
-    """
-    Given a set of tokens that all have N words, and one of those tokens T for which we're trying
-    to find the minimally unique value, calculate the shortest form that is still unique, that
-    still has N words, and that diverges as far to the left as possible.
+def _next_minu_cfg(counts):
+    for total in range(1, sum(counts) + 1):
+        for way in _next_way_to_reach(total, counts):
+            yield way
 
-    We do this by iterating over all possible alt forms of T until we find one that is unique.
-    The order of our iteration is crucial. First we iterate over all alt forms that use only
-    one character from each word. If that's not enough, we add a new character on the first
-    (leftmost) word and check again. If that's not enough, we remove the extra character from
-    the first word and instead add an extra character to the second word. This is the counter-
-    intuitive step. *We are holding the length constant until we've tried the extra character
-    in every word, rather than just appending more and more characters to the leftmost word.
-    This is because we prefer shorter to longer MORE than we prefer characters to accumulate
-    at the left.
-    """
-    this_tokens_words = words_in_tokens_with_same_wordcount[token_idx]
-    word_count = len(this_tokens_words)
-    len_per_word = [len(w) for w in this_tokens_words]
-    idx_per_word = [0] * word_count
-    last_incremented_idx = word_count - 1
-    other_count = len(words_in_tokens_with_same_wordcount) - 1
+
+def _make_minu(words, cfg):
+    minu = ""
+    i = 0
+    for char_count in cfg:
+        prefix = words[i][:char_count]
+        minu += prefix + "-"
+        i += 1
+    return minu[:-1]
+
+
+def _next_minu(token):
+    words = token.split('-')
+    counts = [len(w) for w in words]
+    for cfg in _next_minu_cfg(counts):
+        yield _make_minu(words, cfg)
+
+
+def _minu_matches(minu, token):
+    assert minu
+    assert token
+    left_end = len(minu)
+    right_end = len(token)
+    left_i = 0
+    right_i = 0
     while True:
-        different_count = 0
-        combo = get_prefix_set(this_tokens_words, idx_per_word)
-        for i in range(len(words_in_tokens_with_same_wordcount)):
-            if i != token_idx:
-                other_words = words_in_tokens_with_same_wordcount[i]
-                other_combo = get_prefix_set(other_words, idx_per_word)
-                # If we found a divergence between the token of interest and this one,
-                # remove this one from those that are not unique yet.
-                if combo != other_combo:
-                    different_count += 1
-        # If the current combo has diverged from every other token's combo, we've found something unique.
-        if different_count == other_count:
-            return combo
-        last_incremented_idx = increment_index_per_word(idx_per_word, len_per_word, last_incremented_idx, word_count)
-
-
-def truncated_matches(combo, other_words):
-    for i in range(len(combo)):
-        if not other_words[i].startswith(combo[i]):
+        left_c = minu[left_i]
+        if left_c == '-': # skip ahead on right
+            right_i = token.find('-', right_i)
+            if right_i == -1:
+                return False
+        right_c = token[right_i]
+        if left_c != right_c:
             return False
-    return True
+        left_i += 1
+        if left_i == left_end:
+            return True
+        right_i += 1
+        if right_i == right_end:
+            return False
 
 
-def cut_redundant_suffixes(first_answer, words_in_tokens_with_same_wordcount, token_idx):
-    shortest = first_answer
-    while len(shortest) > 1:
-        suffix = shortest[-1]
-        if len(suffix) > 1:
-            break
-        shorter = shortest[:-1]
-        for i in range(len(words_in_tokens_with_same_wordcount)):
-            if i != token_idx:
-                other_words = words_in_tokens_with_same_wordcount[i]
-                if truncated_matches(shorter, other_words):
-                    return shortest
-        shortest = shorter
-    return shortest
+def _find_match(tokens, minu, skip_idxs):
+    for i in range(len(tokens)):
+        if i not in skip_idxs:
+            if _minu_matches(minu, tokens[i]):
+                return i
+    return -1
 
 
-def get_minu(words_in_tokens_with_same_wordcount, token_idx):
-    """
-    Suppose we want to find the minimally unique repr for "abcd-pqr-de" within the token set:
-    { "abcd-efg-x", "abcd-efg-y", "abcd-pqr-de", "abcdm-pyx-de", "abcdn-zyx-de" }. Then:
+def _get_indexes_of_long_forms(short, tokens):
+    short += '-'
+    idxs = []
+    for i in range(len(tokens)):
+        if tokens[i].startswith(short):
+            idxs.append(i)
+    return idxs
 
-    words_in_tokens_with_same_wordcount = an array of arrays matching that token set (i.e.,
-      the first array = ["abcde", "efg", "x"], and so forth)
-    token_idx = 2
 
-    The correct output is the value "a-pq". We calculate it in two steps:
+def _get_ith_minu(tokens, i):
+    token = tokens[i]
+    words = token.split('-')
+    counts = [len(w) for w in words]
+    skip_idxs = [i] + _get_indexes_of_long_forms(token, tokens)
+    for cfg in _next_minu_cfg(counts):
+        minu = _make_minu(words, cfg)
+        if _find_match(tokens, minu, skip_idxs) == -1:
+            return minu
+    return token
 
-    1. Find the shortest unique 3-word form ("a-pq-d" for the situation above).
-    2. Check and realize we can optimize by dropping the '-d' suffix.
-    """
-    best = get_best_with_same_word_count(
-        words_in_tokens_with_same_wordcount, token_idx)
-    best = cut_redundant_suffixes(best, words_in_tokens_with_same_wordcount, token_idx)
-    return '-'.join(best)
+
+def to_camel(minu):
+    words = minu.split('-')
+    if len(words) > 1:
+        words = [words[0]] + [x[0].upper() + x[1:] for x in words[1:]]
+    return ''.join(words)
 
 
 def get_all_minu(tokens):
@@ -216,47 +181,44 @@ def get_all_minu(tokens):
     token        | minimally unique
     ------------ | ---
     abcd-efg     | ab-efg <-- the combo "ab" + "efg" is unique among 2-word tokens
-    abcd-efg-x   | a-e-x <-- the combo "a" + "e" + x is unique among 3-word tokens
+    abcd-efg-x   | a-ef-x <-- the combo "a" + "ef" + "x" is unique among 3-word tokens
     abcd-efg-y   | ab-e-y <-- need "b" to differentiate from 3*1-char version of next
     abcd-pqr-de  | a-pq <-- short form with 3rd word, a-pq-d, adds unnecessary redundancy
     abcdm-pyx-de | a-py <-- shorter and more intuitive than abcdm
     abcdn-zyx-de | a-z
     aw-ex-y      | aw
     abz-eqr-x    | abz
-    abcd-efh     | ab-efh
-    ayz-efg      | ay                    <
+    abcd-efh     | a-efh
+    ayz-efg      | ay
 
     The algorithm below is not optimized for speed or cleverness. We only run this code once in a great
     while, and we don't care how long it takes. Rather, it's optimized for the understanding of coders.
     """
-
-    # First, convert tokens to sequences of words, so we're not constantly slicing and parsing tokens.
-    tokens_as_words = [t.split('-') for t in tokens]
-    # We want to group subsets of tokens according to how many words they contain, because this
-    # makes analysis easier; it limits how many potential colliding tokens we need to consider for
-    # any given token. Allocate an array to hold sets. Assume there won't e more than 8 different
-    # sets (meaning no token will have more than 8 words). If this assumption is false, something
-    # will blow up.
-    sets_by_word_count = [None]*8
-    for i in range(len(tokens_as_words)):
-        t = tokens_as_words[i]
-        wc_set_idx = len(t)
-        this_set = sets_by_word_count[wc_set_idx]
-        if not this_set:
-            this_set = []
-            sets_by_word_count[wc_set_idx] = this_set
-        this_set.append((t, i))
-    minu_list = [None] * len(tokens_as_words)
-    # Now analyze all tokens with the same wordcount as a set over which uniqueness must be achieved.
-    for this_set in sets_by_word_count:
-        if this_set:
-            list_of_token_words = [pair[0] for pair in this_set]
-            indexes = [pair[1] for pair in this_set]
-            for i in range(len(list_of_token_words)):
-                minu_list[indexes[i]] = get_minu(list_of_token_words, i)
-    return minu_list
+    i = 0
+    x = []
+    for t in tokens:
+        x.append(_get_ith_minu(tokens, i))
+        i += 1
+    return x
 
 
 if __name__ == '__main__':
-    tokens = load(sys.argv[1])
-    mins = get_all_minu(tokens)
+    print(to_camel("a-bc-def"))
+    #import sys
+    #parsed_lines = load(sys.argv[1])
+    import os
+    fname = os.path.join(os.path.dirname(os.path.abspath(__file__)), "property-names.md")
+    parsed_lines = load(fname)
+    tokens = [l[1].group(1) for l in parsed_lines if l[1]]
+    minus = get_all_minu(tokens)
+    i = 0
+    for pl in parsed_lines:
+        if pl[1]:
+            minu = minus[i]
+            camel = to_camel(minu)
+            if camel != minu:
+                minu = minu + ' or ' + camel
+            print(tokens[i] + " | " + minu + ' | ' + pl[1].group(3))
+            i += 1
+        else:
+            print(pl[0])
